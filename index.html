@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, viewport-fit=cover">
-  <title>pinlex.work — Конструктор цифровых визиток (Build 2.4 Hotfix)</title>
+  <title>pinlex.work — Конструктор цифровых визиток (Build 2.5 Hotfix)</title>
   <meta name="description" content="Создайте стильную онлайн-визитку за пару кликов с глубокой кастомизацией, шрифтами Discord, GIF-анимациями, QR-кодом и онлайн-сохранением.">
   <link rel="manifest" href="manifest.json">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -19,7 +19,7 @@
         <a href="index.html" class="brand" title="pinlex.work">
           <span class="brand__logo">P</span>
           <span class="brand__text">pinlex<span class="brand__dot">.work</span></span>
-          <span class="brand__badge">BUILD 2.4</span>
+          <span class="brand__badge">BUILD 2.5</span>
           <span class="admin-top-badge" id="topAdminBadge" title="Полный доступ Администратора активен">🛡️ ADMIN</span>
         </a>
 
@@ -64,25 +64,37 @@
       </div>
     </header>
 
-    <!-- Верхний мобильный переключатель Редактор / Предпросмотр (для iPhone и смартфонов — всегда на виду!) -->
-    <div class="mobile-top-switcher">
-      <button type="button" class="mobile-mode-btn active" data-mobile-mode="edit">
-        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
-        <span>Редактор</span>
+    <!-- Плавающие кнопки для чистого мобильного режима со шторкой слева -->
+    <div class="mobile-floating-triggers">
+      <button type="button" class="mobile-drawer-trigger" id="btnOpenMobileDrawer" title="Открыть меню параметров слева">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.3"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="15" y2="18"/></svg>
+        <span>Меню</span>
       </button>
-      <button type="button" class="mobile-mode-btn" data-mobile-mode="preview">
-        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
-        <span>Предпросмотр</span>
-      </button>
-      <button type="button" class="mobile-save-pill" id="btnMobileTopSave">
-        ☁️ Сохранить
+      <button type="button" class="mobile-quick-save-trigger" id="btnMobileTopSave" title="Сохранить изменения в облако">
+        ☁️
       </button>
     </div>
 
+    <!-- Затемнение фона при открытой левой шторке на телефоне -->
+    <div class="mobile-drawer-backdrop" id="mobileDrawerBackdrop"></div>
+
     <!-- Основная рабочая область -->
     <main class="workspace">
-      <!-- ЛЕВАЯ ЧАСТЬ: Редактор с вкладками -->
+      <!-- ЛЕВАЯ ЧАСТЬ: Редактор (на телефоне выезжает как шторка слева) -->
       <section class="editor-pane" id="editorPane">
+        <!-- Шапка левой шторки (видна на телефоне) -->
+        <div class="drawer-header">
+          <div class="drawer-header__title">
+            <span class="brand__logo" style="width:24px;height:24px;font-size:0.8rem">P</span>
+            <span>Параметры визитки</span>
+            <span class="admin-inline-badge">ADMIN</span>
+          </div>
+          <div class="drawer-header__actions">
+            <button type="button" class="btn btn--online btn--xs" id="btnDrawerSave">☁️ Сохранить</button>
+            <button type="button" class="drawer-close-btn" id="btnCloseMobileDrawer" title="Скрыть шторку и смотреть визитку">✕</button>
+          </div>
+        </div>
+
         <!-- Вкладки конструктора -->
         <nav class="tabs" role="tablist">
           <button type="button" class="tab active" data-tab="profile">

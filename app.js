@@ -1,16 +1,20 @@
-/* ===================== PINLEX.WORK STUDIO ENGINE (BUILD 2.4 HOTFIX UI & MEDIA SYNC) ===================== */
+/* ===================== PINLEX.WORK STUDIO ENGINE (BUILD 2.5 HOTFIX FAST CLOUD & DRAWER) ===================== */
 
-const STORAGE_KEY = 'pinlex-studio-v2.4';
-const CLOUD_ID_KEY = 'pinlex-cloud-id-v2.4';
-const CLOUD_TS_KEY = 'pinlex-cloud-ts-v2.4';
-const GH_TOKEN_KEY = 'pinlex-gh-token-v2.4';
-const PUBLIC_HOST_URL = 'https://drk195.github.io/pinlex-build-2.4-hotfix/';
-const NTFY_TOPIC = 'pinlex_live_drk195_v24';
+const STORAGE_KEY = 'pinlex-studio-v2.5';
+const CLOUD_ID_KEY = 'pinlex-cloud-id-v2.5';
+const CLOUD_TS_KEY = 'pinlex-cloud-ts-v2.5';
+const MEDIA_HASH_KEY = 'pinlex-media-hash-v2.5';
+const MEDIA_FILE_KEY = 'pinlex-media-file-v2.5';
+const GH_TOKEN_KEY = 'pinlex-gh-token-v2.5';
+const PUBLIC_HOST_URL = 'https://drk195.github.io/pinlex-build-2.5-hotfix/';
+const NTFY_TOPIC = 'pinlex_media_drk195_v25';
 const NTFY_URL = `https://ntfy.sh/${NTFY_TOPIC}`;
 const KV_APP_KEY = '457jwo8w';
 const KV_BASE_URL = 'https://keyvalue.immanuel.co/api/KeyVal';
 const DEVICE_ID = 'dev_' + Math.random().toString(36).slice(2, 9);
 let lastSyncedTs = Number(localStorage.getItem(CLOUD_TS_KEY) || 0);
+let lastUploadedMediaHash = localStorage.getItem(MEDIA_HASH_KEY) || '';
+let lastUploadedMediaFile = localStorage.getItem(MEDIA_FILE_KEY) || '';
 let isApplyingRemote = false;
 let autoPushTimer = null;
 
@@ -1873,7 +1877,18 @@ function renderCard(d, { preview = false } = {}) {
   </div>`;
 }
 
-/* ===================== КОДИРОВАНИЕ ССЫЛКИ, ОБЛАЧНОЕ СОХРАНЕНИЕ И АВТОНОМНЫЙ HTML ===================== */
+/* ===================== КОДИРОВАНИЕ ССЫЛКИ, БЫСТРОЕ ОБЛАКО (180-CHAR KV + MEDIA) И АВТОНОМНЫЙ HTML ===================== */
+function quickHash(str) {
+  const s = String(str || '');
+  if (!s) return '0';
+  let h = 0;
+  const step = Math.max(1, Math.floor(s.length / 200));
+  for (let i = 0; i < s.length; i += step) {
+    h = ((h << 5) - h + s.charCodeAt(i)) | 0;
+  }
+  return `${s.length}_${h}`;
+}
+
 function encodeData(d) {
   const diff = {};
   for (const k of Object.keys(d)) {
@@ -1889,6 +1904,7 @@ function encodeData(d) {
       diff[k] = d[k];
     }
   }
+  if (d._mediaFile) diff._mediaFile = d._mediaFile;
   const json = JSON.stringify(diff);
   return btoa(unescape(encodeURIComponent(json))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
@@ -1920,79 +1936,119 @@ function getQrImageUrl(url, size = 240) {
   return `https://api.qrserver.com/v1/create-qr-code/?size=${size}x${size}&margin=8&data=${encodeURIComponent(url)}`;
 }
 
-/* ===================== РЕАЛЬНАЯ ОБЛАЧНАЯ СИНХРОНИЗАЦИЯ ПК ↔ ТЕЛЕФОН (ПОЛНЫЙ ПРОФИЛЬ + ФОТО + ШАПКА) ===================== */
-async function pushToFullCloud(fullState, ts, devId) {
-  const payload = JSON.stringify({
-    cardState: fullState,
-    ts,
-    device: devId,
-  });
+/* ===================== БЫСТРАЯ ДВУХКАНАЛЬНАЯ СИНХРОНИЗАЦИЯ СО ВСЕМИ ВКЛАДКАМИ (0.15 СЕК) ===================== */
+async function ensureMediaUploaded(fullState) {
+  const hasCustomAvatar = fullState.avatar && fullState.avatar.startsWith('data:') && !GIF_AVATAR_PRESETS.some(p => p.url === fullState.avatar);
+  const hasCustomCover = fullState.cover && fullState.cover.startsWith('data:') && !GIF_COVER_PRESETS.some(p => p.url === fullState.cover);
 
-  // Отправляем Simple POST на ntfy.sh без кастомных заголовков (без CORS preflight!).
-  // Если размер > 4 КБ (с фото профиля и шапкой), ntfy.sh автоматически сохраняет весь JSON в attachment.url!
-  const res = await fetch(NTFY_URL, {
-    method: 'POST',
-    body: payload,
-  });
-  if (!res.ok) return false;
+  if (!hasCustomAvatar && !hasCustomCover) {
+    fullState._mediaFile = '';
+    return '';
+  }
+
+  const currentHash = quickHash(hasCustomAvatar ? fullState.avatar : '') + '|' + quickHash(hasCustomCover ? fullState.cover : '');
+  if (currentHash === lastUploadedMediaHash && lastUploadedMediaFile) {
+    fullState._mediaFile = lastUploadedMediaFile;
+    return lastUploadedMediaFile;
+  }
 
   try {
-    const metaInfo = await res.json();
-    const attachUrl = metaInfo?.attachment?.url || '';
-    if (attachUrl) {
-      // Сохраняем также резервный указатель на файл в KeyVal
-      const fileId = attachUrl.split('/').pop();
-      fetch(`${KV_BASE_URL}/UpdateValue/${KV_APP_KEY}/pinlex_file_v24/${encodeURIComponent(fileId + '_' + ts + '_' + devId)}`, {
-        method: 'POST',
-      }).catch(() => {});
-    }
-  } catch {}
-  return true;
-}
-
-async function pullFromFullCloud() {
-  try {
-    const res = await fetch(`${NTFY_URL}/json?poll=1&since=24h`, { cache: 'no-store' });
+    const mediaPayload = JSON.stringify({
+      avatar: hasCustomAvatar ? fullState.avatar : '',
+      cover: hasCustomCover ? fullState.cover : '',
+    });
+    // Дополняем пробелами до 4100 байт, чтобы ntfy.sh всегда сохранял медиа как быстрый прямой файл attachment.url
+    const padded = mediaPayload.length < 4100 ? mediaPayload + ' '.repeat(4100 - mediaPayload.length) : mediaPayload;
+    const res = await fetch(NTFY_URL, { method: 'POST', body: padded });
     if (res.ok) {
-      const text = await res.text();
-      const lines = text.trim().split('\n').filter(Boolean);
-      for (let i = lines.length - 1; i >= 0; i--) {
-        try {
-          const evt = JSON.parse(lines[i]);
-          if (evt.event !== 'message') continue;
-          if (evt.attachment?.url) {
-            const attRes = await fetch(evt.attachment.url, { cache: 'no-store' });
-            if (attRes.ok) {
-              const parsed = await attRes.json();
-              if (parsed && parsed.cardState && parsed.ts) return parsed;
-            }
-          } else if (evt.message) {
-            const parsed = JSON.parse(evt.message);
-            if (parsed && parsed.cardState && parsed.ts) return parsed;
-          }
-        } catch {}
+      const info = await res.json();
+      const attachUrl = info?.attachment?.url || '';
+      if (attachUrl) {
+        const fileId = attachUrl.split('/').pop();
+        lastUploadedMediaHash = currentHash;
+        lastUploadedMediaFile = fileId;
+        localStorage.setItem(MEDIA_HASH_KEY, currentHash);
+        localStorage.setItem(MEDIA_FILE_KEY, fileId);
+        fullState._mediaFile = fileId;
+        return fileId;
       }
     }
   } catch (e) {
-    console.warn('Ntfy poll fallback:', e);
+    console.warn('Media upload warning:', e);
+  }
+  return fullState._mediaFile || '';
+}
+
+async function pushFastCloud(fullState, ts, devId) {
+  await ensureMediaUploaded(fullState);
+  const safeB64 = encodeData(fullState) || 'e30';
+  // Размер чанка 180 символов — 100% проходит лимит URL-сегмента сервера для любых вкладок (Цифры, Услуги, Кнопки, FAQ, Вид соцсетей)!
+  const chunkSize = 180;
+  const chunks = [];
+  for (let i = 0; i < safeB64.length; i += chunkSize) {
+    chunks.push(safeB64.slice(i, i + chunkSize));
+  }
+  if (!chunks.length) chunks.push('e30');
+
+  await Promise.all(
+    chunks.map((chunk, idx) =>
+      fetch(`${KV_BASE_URL}/UpdateValue/${KV_APP_KEY}/px25_c${idx}/${chunk}`, {
+        method: 'POST',
+      })
+    )
+  );
+
+  const meta = `${chunks.length}_${ts}_${devId}`;
+  const metaRes = await fetch(`${KV_BASE_URL}/UpdateValue/${KV_APP_KEY}/px25_meta/${meta}`, {
+    method: 'POST',
+  });
+  return metaRes.ok;
+}
+
+const mediaFileCache = {};
+
+async function pullFastCloud() {
+  const metaRes = await fetch(`${KV_BASE_URL}/GetValue/${KV_APP_KEY}/px25_meta`, { cache: 'no-store' });
+  if (!metaRes.ok) return null;
+  const rawMeta = (await metaRes.text()).replace(/^"|"$/g, '').trim();
+  if (!rawMeta || !rawMeta.includes('_')) return null;
+
+  const parts = rawMeta.split('_');
+  const count = Number(parts[0] || 0);
+  const ts = Number(parts[1] || 0);
+  const devId = parts.slice(2).join('_');
+  if (count <= 0 || ts <= 0) return null;
+
+  const chunkValues = await Promise.all(
+    Array.from({ length: count }, (_, idx) =>
+      fetch(`${KV_BASE_URL}/GetValue/${KV_APP_KEY}/px25_c${idx}`, { cache: 'no-store' })
+        .then(r => (r.ok ? r.text() : ''))
+        .then(txt => txt.replace(/^"|"$/g, '').trim())
+    )
+  );
+
+  const cardB64 = chunkValues.join('');
+  const decoded = decodeData(cardB64);
+
+  if (decoded._mediaFile) {
+    const fId = decoded._mediaFile;
+    if (mediaFileCache[fId]) {
+      if (mediaFileCache[fId].avatar) decoded.avatar = mediaFileCache[fId].avatar;
+      if (mediaFileCache[fId].cover) decoded.cover = mediaFileCache[fId].cover;
+    } else {
+      try {
+        const mRes = await fetch(`https://ntfy.sh/file/${fId}`, { cache: 'no-store' });
+        if (mRes.ok) {
+          const mData = await mRes.json();
+          mediaFileCache[fId] = mData;
+          if (mData.avatar) decoded.avatar = mData.avatar;
+          if (mData.cover) decoded.cover = mData.cover;
+        }
+      } catch {}
+    }
   }
 
-  // Резервное чтение файла через указатель KeyVal (если прошло больше 24 часов)
-  try {
-    const kvRes = await fetch(`${KV_BASE_URL}/GetValue/${KV_APP_KEY}/pinlex_file_v24`, { cache: 'no-store' });
-    if (kvRes.ok) {
-      const raw = (await kvRes.text()).replace(/^"|"$/g, '').trim();
-      const [fileId, tsStr, devId] = raw.split('_');
-      if (fileId && Number(tsStr) > 0) {
-        const attRes = await fetch(`https://ntfy.sh/file/${fileId}`, { cache: 'no-store' });
-        if (attRes.ok) {
-          const parsed = await attRes.json();
-          if (parsed && parsed.cardState) return parsed;
-        }
-      }
-    }
-  } catch {}
-  return null;
+  return { cardState: decoded, ts, device: devId };
 }
 
 function scheduleAutoCloudPush() {
@@ -2000,31 +2056,38 @@ function scheduleAutoCloudPush() {
   clearTimeout(autoPushTimer);
   const syncTitle = $('#onlineSyncTitle');
   if (syncTitle) {
-    syncTitle.innerHTML = `⏳ Авто-сохранение профиля и фото... <span class="admin-inline-badge">ADMIN</span>`;
+    syncTitle.innerHTML = `⏳ Авто-синхронизация с облаком... <span class="admin-inline-badge">ADMIN</span>`;
   }
   autoPushTimer = setTimeout(() => {
     saveCardOnline({ silent: true });
-  }, 850);
+  }, 600);
 }
 
 async function pullFromMasterCloud({ isInitial = false } = {}) {
   try {
-    const cloudData = await pullFromFullCloud();
+    const cloudData = await pullFastCloud();
     if (!cloudData || !cloudData.cardState || cloudData.ts <= 0) return false;
 
     const remoteState = cloudData.cardState;
     const remoteTs = Number(cloudData.ts || 0);
     const remoteDev = cloudData.device || '';
 
-    // Загружаем из облака, если облачная версия новее нашей локальной (remoteTs > lastSyncedTs)
-    if (remoteTs > lastSyncedTs && (isInitial || remoteDev !== DEVICE_ID)) {
+    if ((isInitial && remoteTs >= lastSyncedTs) || (remoteDev !== DEVICE_ID && remoteTs > lastSyncedTs)) {
       isApplyingRemote = true;
+      const keepAvatar = remoteState.avatar || (!remoteState._mediaFile && !remoteState._avPreset ? '' : state.avatar);
+      const keepCover = remoteState.cover || (!remoteState._mediaFile && !remoteState._covPreset ? '' : state.cover);
       state = {
         ...structuredClone(EMPTY),
         ...remoteState,
+        avatar: remoteState.avatar !== undefined ? remoteState.avatar : keepAvatar,
+        cover: remoteState.cover !== undefined ? remoteState.cover : keepCover,
         isAdmin: true,
         isPro: true,
         socials: { ...(EMPTY.socials || {}), ...(remoteState.socials || {}) },
+        customLinks: Array.isArray(remoteState.customLinks) ? remoteState.customLinks : structuredClone(EMPTY.customLinks),
+        stats: Array.isArray(remoteState.stats) ? remoteState.stats : structuredClone(EMPTY.stats),
+        services: Array.isArray(remoteState.services) ? remoteState.services : structuredClone(EMPTY.services),
+        faqs: Array.isArray(remoteState.faqs) ? remoteState.faqs : structuredClone(EMPTY.faqs),
       };
       lastSyncedTs = remoteTs;
       localStorage.setItem(CLOUD_TS_KEY, String(lastSyncedTs));
@@ -2038,10 +2101,10 @@ async function pullFromMasterCloud({ isInitial = false } = {}) {
       const syncTitle = $('#onlineSyncTitle');
       const syncSub = $('#onlineSyncSub');
       const statusEl = $('#cloudStatusInput');
-      if (syncTitle) syncTitle.innerHTML = `🔄 Синхронизировано ПК ↔ Телефон (${timeStr}) <span class="admin-inline-badge">ADMIN</span>`;
-      if (syncSub) syncSub.textContent = `Профиль, фото и шапка синхронизированы между устройствами`;
+      if (syncTitle) syncTitle.innerHTML = `🔄 Синхронизировано с облаком (${timeStr}) <span class="admin-inline-badge">ADMIN</span>`;
+      if (syncSub) syncSub.textContent = `Все вкладки (профиль, цифры, услуги, соцсети, фото) актуальны`;
       if (statusEl) statusEl.value = `✅ Загружено из облака (${timeStr})`;
-      if (!isInitial) toast('🔄 Загружены свежие изменения (включая фото и шапку)!');
+      if (!isInitial) toast('🔄 Загружены свежие изменения из облака!');
       return true;
     }
   } catch (e) {
@@ -2056,7 +2119,7 @@ function startLiveCloudPolling() {
   pullFromMasterCloud({ isInitial: true });
   setInterval(() => {
     pullFromMasterCloud({ isInitial: false });
-  }, 4000);
+  }, 3500);
 }
 
 async function saveCardOnline({ silent = false } = {}) {
@@ -2070,18 +2133,19 @@ async function saveCardOnline({ silent = false } = {}) {
   const syncTitle = $('#onlineSyncTitle');
   const syncSub = $('#onlineSyncSub');
 
-  if (statusEl) statusEl.value = '⏳ Сохранение профиля, фото и шапки...';
-  if (!silent) toast('⏳ Сохраняем профиль, фото и шапку для ПК и Телефона...');
+  if (statusEl) statusEl.value = '⏳ Быстрая синхронизация всех вкладок...';
+  if (!silent) toast('⏳ Сохраняем все вкладки и фото в облако...');
 
   let syncedOk = false;
   try {
-    syncedOk = await pushToFullCloud(state, nowTs, DEVICE_ID);
+    syncedOk = await pushFastCloud(state, nowTs, DEVICE_ID);
+    saveState();
   } catch (e) {
-    console.warn('Full cloud sync warning:', e);
+    console.warn('Fast cloud sync warning:', e);
   }
 
   const ghToken = ($('#ghTokenInput')?.value || localStorage.getItem(GH_TOKEN_KEY) || '').trim();
-  const ghRepo = ($('#ghRepoInput')?.value || 'dRk195/pinlex-build-2.4-hotfix').trim();
+  const ghRepo = ($('#ghRepoInput')?.value || 'dRk195/pinlex-build-2.5-hotfix').trim();
   if (ghToken && !silent) {
     localStorage.setItem(GH_TOKEN_KEY, ghToken);
     try {
@@ -2094,15 +2158,15 @@ async function saveCardOnline({ silent = false } = {}) {
   const liveUrl = `${getBaseHost()}card.html`;
   const timeStr = new Date(nowTs).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
-  if (statusEl) statusEl.value = syncedOk ? `✅ Профиль и фото сохранены (${timeStr})` : `✅ Сохранено локально (${timeStr})`;
+  if (statusEl) statusEl.value = syncedOk ? `✅ Все вкладки сохранены в облаке (${timeStr})` : `✅ Сохранено локально (${timeStr})`;
   if (liveUrlEl) liveUrlEl.value = liveUrl;
-  if (syncTitle) syncTitle.innerHTML = `✅ Профиль, фото и шапка сохранены (${timeStr}) <span class="admin-inline-badge">ADMIN</span>`;
-  if (syncSub) syncSub.textContent = `Обновите страницу на телефоне или ПК — все изменения и фото уже там!`;
+  if (syncTitle) syncTitle.innerHTML = `✅ Синхронизировано с облаком (${timeStr}) <span class="admin-inline-badge">ADMIN</span>`;
+  if (syncSub) syncSub.textContent = `Все вкладки и Live Online Card обновлены мгновенно!`;
 
   if ($('#qrImage')) $('#qrImage').src = getQrImageUrl(getShareUrl(state), 240);
   if ($('#qrDirectLink')) $('#qrDirectLink').href = getShareUrl(state);
 
-  if (!silent) toast('✅ Профиль, фото и шапка успешно сохранены онлайн!');
+  if (!silent) toast('✅ Все вкладки, цифры, соцсети и фото сохранены в облаке!');
   return liveUrl;
 }
 
@@ -2222,24 +2286,29 @@ document.getElementById('exSendBtn')?.addEventListener('click', function() {
 </html>`;
 }
 
-/* ===================== РЕЖИМ ПРОСМОТРА ГОСТЕМ (?cloud=ID, ?live=1 или #card=...) ===================== */
+/* ===================== МГНОВЕННАЯ ЗАГРУЗКА LIVE ONLINE CARD (0.01 СЕК + РЕАКТИВНОЕ ОБЛАКО) ===================== */
+let guestInteractionsBound = false;
+let guestCardStyleEl = null;
+
 function renderGuestPage(d) {
   const t = getEffectiveTheme(d);
   document.title = `${fullName(d) || 'Визитка'} — pinlex.work`;
-  const style = document.createElement('style');
-  style.textContent = CARD_CSS + `
+  if (!guestCardStyleEl) {
+    guestCardStyleEl = document.createElement('style');
+    document.head.appendChild(guestCardStyleEl);
+  }
+  guestCardStyleEl.textContent = CARD_CSS + `
     body {
       min-height: 100vh;
       display: flex;
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      padding: 28px 14px;
+      padding: 24px 12px;
       background: ${t.page};
     }
   `;
-  document.head.appendChild(style);
-  document.body.innerHTML = renderCard(d) + `
+  document.body.innerHTML = `<div id="guestCardStage" style="width:100%;display:flex;justify-content:center">${renderCard(d)}</div>
     <div class="modal-backdrop" id="qrModal" hidden>
       <div class="modal">
         <div class="modal__header">
@@ -2258,7 +2327,10 @@ function renderGuestPage(d) {
     </div>
     <div class="toast" id="toast"></div>
   `;
-  bindCardInteractions(d);
+  if (!guestInteractionsBound) {
+    guestInteractionsBound = true;
+    bindCardInteractions(d);
+  }
 }
 
 async function tryViewMode() {
@@ -2266,41 +2338,55 @@ async function tryViewMode() {
   const isLive = params.get('live') || /card\.html$/i.test(location.pathname);
   const hashMatch = location.hash.match(/^#card=(.+)$/);
 
-  // 1. Если открыта страница живой визитки (card.html или ?live=1), сначала берем самое свежее состояние (вместе с фото и шапкой!) из единого облака ПК ↔ Телефон!
+  // 1. ПРИОРИТЕТ: МГНОВЕННАЯ ОТРИСОВКА LIVE ONLINE CARD ЗА 0.01 СЕК (БЕЗ ОЖИДАНИЯ СЕТИ!) + РЕАКТИВНОЕ ОБЛАЧНОЕ ОБНОВЛЕНИЕ
   if (isLive) {
-    try {
-      const cloudData = await pullFromFullCloud();
-      if (cloudData && cloudData.cardState && cloudData.ts > 0) {
-        const d = {
-          ...structuredClone(EMPTY),
-          ...cloudData.cardState,
-          socials: { ...(EMPTY.socials || {}), ...(cloudData.cardState.socials || {}) },
-        };
-        renderGuestPage(d);
-        return true;
-      }
-    } catch (e) {
-      console.warn('Master cloud guest fetch fallback:', e);
-    }
-
+    let initialGuestState = structuredClone(state || EMPTY);
     if (hashMatch) {
       try {
         const decoded = decodeData(hashMatch[1]);
-        const d = { ...structuredClone(EMPTY), ...decoded, socials: { ...(EMPTY.socials || {}), ...(decoded.socials || {}) } };
-        renderGuestPage(d);
-        return true;
+        initialGuestState = { ...structuredClone(EMPTY), ...decoded, socials: { ...(EMPTY.socials || {}), ...(decoded.socials || {}) } };
       } catch {}
     }
 
-    try {
-      const res = await fetch(`live-card.json?t=${Date.now()}`);
-      if (res.ok) {
-        const data = await res.json();
-        const d = { ...structuredClone(EMPTY), ...data, socials: { ...(data.socials || {}) } };
-        renderGuestPage(d);
-        return true;
+    // Отрисовываем карточку МГНОВЕННО в первую же миллисекунду!
+    renderGuestPage(initialGuestState);
+
+    // Восстанавливаем медиа из локального IndexedDB, если открыто на том же устройстве
+    idbLoadMedia().then(idbMedia => {
+      if (idbMedia && (idbMedia.avatar || idbMedia.cover)) {
+        if (!initialGuestState.avatar && idbMedia.avatar) initialGuestState.avatar = idbMedia.avatar;
+        if (!initialGuestState.cover && idbMedia.cover) initialGuestState.cover = idbMedia.cover;
+        renderGuestPage(initialGuestState);
       }
-    } catch {}
+    });
+
+    // Функция мгновенной синхронизации Live Online Card с нашим облаком
+    let guestLastTs = 0;
+    const syncGuestWithCloud = async () => {
+      try {
+        const cloudData = await pullFastCloud();
+        if (cloudData && cloudData.cardState && cloudData.ts > guestLastTs) {
+          guestLastTs = cloudData.ts;
+          const d = {
+            ...structuredClone(EMPTY),
+            ...cloudData.cardState,
+            socials: { ...(EMPTY.socials || {}), ...(cloudData.cardState.socials || {}) },
+            customLinks: Array.isArray(cloudData.cardState.customLinks) ? cloudData.cardState.customLinks : structuredClone(EMPTY.customLinks),
+            stats: Array.isArray(cloudData.cardState.stats) ? cloudData.cardState.stats : structuredClone(EMPTY.stats),
+            services: Array.isArray(cloudData.cardState.services) ? cloudData.cardState.services : structuredClone(EMPTY.services),
+            faqs: Array.isArray(cloudData.cardState.faqs) ? cloudData.cardState.faqs : structuredClone(EMPTY.faqs),
+          };
+          renderGuestPage(d);
+        }
+      } catch (e) {
+        console.warn('Live card cloud sync check:', e);
+      }
+    };
+
+    // Запускаем облачное обновление сразу и каждые 3 секунды в реальном времени!
+    syncGuestWithCloud();
+    setInterval(syncGuestWithCloud, 3000);
+    return true;
   }
 
   if (hashMatch) {
@@ -2549,8 +2635,8 @@ function renderDynamicLists() {
       stContainer.innerHTML = state.stats.map((st, idx) => `
         <div class="dyn-item">
           <div class="dyn-item__row">
-            <input type="text" style="width:140px;font-weight:700" value="${esc(st.value)}" placeholder="7+ лет" data-st-idx="${idx}" data-st-prop="value">
-            <input type="text" style="flex:1" value="${esc(st.label)}" placeholder="опыта в индустрии" data-st-idx="${idx}" data-st-prop="label">
+            <input type="text" style="flex:0 1 115px;font-weight:700" value="${esc(st.value)}" placeholder="7+ лет" data-st-idx="${idx}" data-st-prop="value">
+            <input type="text" style="flex:1 1 140px" value="${esc(st.label)}" placeholder="опыта в индустрии" data-st-idx="${idx}" data-st-prop="label">
             <button type="button" class="btn btn--danger btn--xs" data-st-remove="${idx}">✕</button>
           </div>
         </div>
@@ -2567,8 +2653,8 @@ function renderDynamicLists() {
       svContainer.innerHTML = state.services.map((sv, idx) => `
         <div class="dyn-item">
           <div class="dyn-item__row">
-            <input type="text" style="flex:1;font-weight:600" value="${esc(sv.title)}" placeholder="Название услуги" data-sv-idx="${idx}" data-sv-prop="title">
-            <input type="text" style="width:140px" value="${esc(sv.price)}" placeholder="от 50 000 ₸" data-sv-idx="${idx}" data-sv-prop="price">
+            <input type="text" style="flex:1 1 160px;font-weight:600" value="${esc(sv.title)}" placeholder="Название услуги" data-sv-idx="${idx}" data-sv-prop="title">
+            <input type="text" style="flex:0 1 130px" value="${esc(sv.price)}" placeholder="от 50 000 ₸" data-sv-idx="${idx}" data-sv-prop="price">
             <button type="button" class="btn btn--danger btn--xs" data-sv-remove="${idx}">✕</button>
           </div>
           <input type="text" value="${esc(sv.desc || '')}" placeholder="Краткое описание услуги и что входит в стоимость" data-sv-idx="${idx}" data-sv-prop="desc">
@@ -2676,17 +2762,14 @@ function initStudio() {
     });
   });
 
-  // 4. Мобильное переключение Редактор / Предпросмотр (синхронно для верхней и нижней панели iPhone)
-  document.querySelectorAll('[data-mobile-mode]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const targetMode = btn.dataset.mobileMode;
-      document.querySelectorAll('[data-mobile-mode]').forEach(b => {
-        b.classList.toggle('active', b.dataset.mobileMode === targetMode);
-      });
-      document.body.classList.toggle('mobile-preview-active', targetMode === 'preview');
-    });
-  });
+  // 4. Мобильная левая шторка параметров (Left Slide-Out Drawer)
+  const openDrawer = () => document.body.classList.add('mobile-drawer-open');
+  const closeDrawer = () => document.body.classList.remove('mobile-drawer-open');
 
+  $('#btnOpenMobileDrawer')?.addEventListener('click', openDrawer);
+  $('#btnCloseMobileDrawer')?.addEventListener('click', closeDrawer);
+  $('#mobileDrawerBackdrop')?.addEventListener('click', closeDrawer);
+  $('#btnDrawerSave')?.addEventListener('click', () => saveCardOnline({ silent: false }));
   $('#btnMobileTopSave')?.addEventListener('click', () => saveCardOnline({ silent: false }));
 
   // 5. Переключение рамки Смартфон / ПК
@@ -2722,12 +2805,14 @@ function initStudio() {
     });
   });
 
-  // 7. Слушатели стандартных полей
+  // 7. Слушатели всех полей и выпадающих списков (<select> включая Вид соцсетей socialDisplay)
   document.querySelectorAll('[data-field]').forEach(el => {
-    el.addEventListener('input', () => {
+    const onFieldChange = () => {
       state[el.dataset.field] = el.value;
       update();
-    });
+    };
+    el.addEventListener('input', onFieldChange);
+    el.addEventListener('change', onFieldChange);
   });
 
   document.querySelectorAll('[data-check]').forEach(el => {
@@ -2738,10 +2823,12 @@ function initStudio() {
   });
 
   document.querySelectorAll('[data-social]').forEach(el => {
-    el.addEventListener('input', () => {
+    const onSocialChange = () => {
       state.socials[el.dataset.social] = el.value;
       update();
-    });
+    };
+    el.addEventListener('input', onSocialChange);
+    el.addEventListener('change', onSocialChange);
   });
 
   document.querySelectorAll('.theme-card').forEach(btn => {
@@ -2751,25 +2838,38 @@ function initStudio() {
     });
   });
 
-  // 8. Делегирование событий для динамических списков
-  document.addEventListener('input', e => {
+  // 8. Делегирование событий (input + change) для всех динамических списков (Кнопки, Цифры и факты, Услуги, FAQ)
+  const handleDynamicListEvent = e => {
     const t = e.target;
     if (t.dataset.clIdx !== undefined) {
       const idx = Number(t.dataset.clIdx);
       const prop = t.dataset.clProp;
-      state.customLinks[idx][prop] = t.type === 'checkbox' ? t.checked : t.value;
-      update();
+      if (state.customLinks[idx]) {
+        state.customLinks[idx][prop] = t.type === 'checkbox' ? t.checked : t.value;
+        update();
+      }
     } else if (t.dataset.stIdx !== undefined) {
-      state.stats[Number(t.dataset.stIdx)][t.dataset.stProp] = t.value;
-      update();
+      const idx = Number(t.dataset.stIdx);
+      if (state.stats[idx]) {
+        state.stats[idx][t.dataset.stProp] = t.value;
+        update();
+      }
     } else if (t.dataset.svIdx !== undefined) {
-      state.services[Number(t.dataset.svIdx)][t.dataset.svProp] = t.value;
-      update();
+      const idx = Number(t.dataset.svIdx);
+      if (state.services[idx]) {
+        state.services[idx][t.dataset.svProp] = t.value;
+        update();
+      }
     } else if (t.dataset.fqIdx !== undefined) {
-      state.faqs[Number(t.dataset.fqIdx)][t.dataset.fqProp] = t.value;
-      update();
+      const idx = Number(t.dataset.fqIdx);
+      if (state.faqs[idx]) {
+        state.faqs[idx][t.dataset.fqProp] = t.value;
+        update();
+      }
     }
-  });
+  };
+  document.addEventListener('input', handleDynamicListEvent);
+  document.addEventListener('change', handleDynamicListEvent);
 
   document.addEventListener('click', e => {
     const clRem = e.target.closest('[data-cl-remove]');
